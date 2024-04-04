@@ -142,7 +142,7 @@ void Worker::fetchData(QStringList *players)
 
                 for (int j = 0; j < dataArray.size(); j++) {
                     data = dataArray[j].toObject();
-                    if (data.value("name").toString().toLower() == players->at(i) && data.value("gear_score").toDouble(0) != 0) {
+                    if (data.value("name").toString().toLower() == players->at(i)) {
                         (*ArmoryGS)[players->at(i + 1)][data.value("name").toString().toLower()] = {QString::number(round(data.value("gear_score").toDouble(0))), data.value("guild").toString(), data.value("name").toString()};
 
                         qDebug() << ((*ArmoryGS)[players->at(i + 1)][players->at(i)].exactname + " | " + (*ArmoryGS)[players->at(i + 1)][players->at(i)].guild + " | " + (*ArmoryGS)[players->at(i + 1)][players->at(i)].gearscore + " | " + players->at(i + 1));
@@ -162,7 +162,7 @@ void Worker::fetchData(QStringList *players)
 
         if (!(*ArmoryGS)[players->at(i + 1)].contains(players->at(i))) {
             (*ArmoryGS)[players->at(i + 1)][players->at(i)] = {"0", "", ""};
-            out << "ArmoryGS[\"" + players->at(i + 1) + "\"][\"" + players->at(i) + "\"] = {\"" + players->at(i) + "\", \"\", 0}\n";
+            out << "ArmoryGS[\"" + players->at(i + 1) + "\"][\"" + players->at(i) + "\"] = {\"" + players->at(i) + "\", \"\", -1}\n";
         }
 
         reply->deleteLater();
