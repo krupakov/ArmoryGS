@@ -14,7 +14,7 @@ Toploader::Toploader(QString threadname, QString folder, bool *enabled, QMap<QSt
     , folder(folder)
     , enabled(enabled)
     , GS100(GS100)
-    , apiLink("https://allods.mail.ru/api/rating/gearscore/")
+    , apiLink("https://allods.ru/api/rating/gearscore/")
 {}
 Toploader::~Toploader() {}
 
