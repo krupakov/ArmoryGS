@@ -35,11 +35,8 @@ void Worker::run() {
         (*ArmoryGS)[it.key()] = {};
     }
 
-    while(!ArmoryFile.open(QIODevice::ExistingOnly | QIODevice::WriteOnly | QIODevice::Text)) {
-        if (!(*enabled)) {
-            return;
-        }
-        this->thread()->sleep(1);
+    if (!openFile(ArmoryFile, QIODevice::WriteOnly | QIODevice::Text)) {
+        return;
     }
 
     QTextStream out(&ArmoryFile);
@@ -51,118 +48,161 @@ void Worker::run() {
     ArmoryFile.close();
 
     while(*enabled) {
-        while(!cfg.open(QIODevice::ExistingOnly | QIODevice::ReadOnly | QIODevice::Text)) {
-            if (!(*enabled)) {
-                return;
-            }
-            this->thread()->sleep(1);
+        if (!openFile(cfg, QIODevice::ExistingOnly | QIODevice::ReadOnly | QIODevice::Text)) {
+            return;
         }
 
         QTextStream in(&cfg);
-        QStringList players;
-        QStringList lines = in.readAll().split('\n');
-        int offset = 0;
-        for (int i = 0; i < lines.size(); i++) {
-            if ((i + offset) < lines.size() && lines[i + offset].trimmed() == "t_b ScriptUserMods_ArmoryGS_buffer") {
-                offset++;
-                if ((i + offset) < lines.size() && lines[i + offset].trimmed() == "t_b data") {
-                    offset++;
-                    if ((i + offset) >= lines.size()) break;
-                    QString line = lines[i + offset];
-                    while (line.trimmed() != "t_e data") {
-                        if ((i + offset + 4) >= lines.size()) break;
-                        QString name = line.trimmed().remove(0, 4).remove(QRegExp("[^(а-яёa-z)]"));
-                        offset++;
-                        line = lines[i + offset];
-                        QString shard = line.trimmed().remove(0, 7).replace("\"", "");
-                        offset++;
-                        offset++;
-                        offset++;
-                        line = lines[i + offset];
-
-                        if (name == "") continue;
-                        if ((*ArmoryGS)[shard].contains(name)) continue;
-                        players << name;
-                        players << shard;
-                    }
-                    break;
-                }
-            }
-        }
-        fetchData(&players);
+        QStringList players = parseBuffer(in);
         in.flush();
         cfg.close();
+
+        if (!players.isEmpty()) {
+            fetchData(&players);
+        }
 
         this->thread()->sleep(1);
     }
 }
 
-void Worker::fetchData(QStringList *players)
-{
+bool Worker::openFile(QFile& file, QIODevice::OpenMode mode) {
+    while (true) {
+        if (!(*enabled)) {
+            return false;
+        }
+
+        if (file.open(mode)) {
+            return true;
+        }
+
+        this->thread()->sleep(1);
+    }
+}
+
+QStringList Worker::parseBuffer(QTextStream& in) {
+    QStringList players;
+    QStringList lines = in.readAll().split('\n');
+    int offset = 0;
+
+    for (int i = 0; i < lines.size(); i++) {
+        if ((i + offset) < lines.size() && lines[i + offset].trimmed() == "t_b ScriptUserMods_ArmoryGS_buffer") {
+            offset++;
+            if ((i + offset) < lines.size() && lines[i + offset].trimmed() == "t_b data") {
+                offset++;
+                if ((i + offset) >= lines.size()) break;
+                QString line = lines[i + offset];
+                while (line.trimmed() != "t_e data") {
+                    if ((i + offset + 4) >= lines.size()) break;
+                    QString name = line.trimmed().remove(0, 4).remove(QRegExp("[^(а-яёa-z)]"));
+                    offset++;
+                    line = lines[i + offset];
+                    QString shard = line.trimmed().remove(0, 7).replace("\"", "");
+                    offset++;
+                    offset++;
+                    offset++;
+                    line = lines[i + offset];
+
+                    if (name.isEmpty()) continue;
+                    if ((*ArmoryGS)[shard].contains(name)) continue;
+                    players << name;
+                    players << shard;
+                }
+                break;
+            }
+        }
+    }
+    return players;
+}
+
+void Worker::fetchData(QStringList *players) {
     QFile ArmoryFile(folder + "\\ArmoryGS.txt");
 
-    while(!ArmoryFile.open(QIODevice::ExistingOnly | QIODevice::Append | QIODevice::Text)) {
-        if (!(*enabled)) {
-            return;
-        }
-        this->thread()->sleep(1);
+    if (!openFile(ArmoryFile, QIODevice::Append | QIODevice::Text)) {
+        return;
     }
 
     QTextStream out(&ArmoryFile);
+    out.setCodec("Windows-1251");
 
     for (int i = 0; i < players->size(); i += 2) {
+        QString playerName = players->at(i);
+        QString shardName = players->at(i + 1);
+
         QNetworkRequest request(url);
         request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
         QJsonObject filter;
-        filter["name"] = players->at(i);
-        filter["server"] = QString::number(Shards.value(players->at(i + 1)));
+        filter["name"] = playerName;
+        filter["server"] = QString::number(Shards.value(shardName));
         QJsonObject postData;
         postData["filter"] = filter;
 
         QNetworkAccessManager manager;
         QNetworkReply *reply = manager.post(request, QJsonDocument(postData).toJson(QJsonDocument::Compact));
 
-        QTimer timer;
-        timer.setSingleShot(true);
-
         QEventLoop loop;
-        connect(&timer, SIGNAL(timeout()), &loop, SLOT(quit()));
-        connect(reply, SIGNAL(finished()), &loop, SLOT(quit()));
-        timer.start(10000);
+        QTimer timeoutTimer;
+        timeoutTimer.setSingleShot(true);
+
+        connect(&timeoutTimer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+
+        timeoutTimer.start(10000);
         loop.exec();
 
-        if (timer.isActive()) {
-            timer.stop();
+        bool requestSuccess = false;
+        if (timeoutTimer.isActive()) {
+            timeoutTimer.stop();
             if (reply->error() == QNetworkReply::NoError) {
-                QByteArray r(reply->readAll());
-                QJsonObject jsonDocument = QJsonDocument::fromJson(r).object();
-                QJsonArray dataArray = jsonDocument["data"].toArray();
-                QJsonObject data;
+                QByteArray responseData = reply->readAll();
+                QJsonParseError parseError;
+                QJsonDocument jsonDocument = QJsonDocument::fromJson(responseData, &parseError);
 
-                for (int j = 0; j < dataArray.size(); j++) {
-                    data = dataArray[j].toObject();
-                    if (data.value("name").toString().toLower() == players->at(i)) {
-                        (*ArmoryGS)[players->at(i + 1)][data.value("name").toString().toLower()] = {QString::number(round(data.value("gear_score").toDouble(0))), data.value("guild").toString(), data.value("name").toString()};
+                if (parseError.error == QJsonParseError::NoError && jsonDocument.isObject()) {
+                    QJsonObject jsonObject = jsonDocument.object();
+                    if (jsonObject.contains("data") && jsonObject["data"].isArray()) {
+                        QJsonArray dataArray = jsonObject["data"].toArray();
 
-                        qDebug() << ((*ArmoryGS)[players->at(i + 1)][players->at(i)].exactname + " | " + (*ArmoryGS)[players->at(i + 1)][players->at(i)].guild + " | " + (*ArmoryGS)[players->at(i + 1)][players->at(i)].gearscore + " | " + players->at(i + 1));
+                        for (const QJsonValue& value : dataArray) {
+                            if (value.isObject()) {
+                                QJsonObject data = value.toObject();
+                                QString name = data.value("name").toString();
 
-                        out << "ArmoryGS[\"" + players->at(i + 1) +
-                                   "\"][\"" + data.value("name").toString().toLower() + "\"] = {\"" +
-                                   data.value("name").toString() + "\", \"" +
-                                   data.value("guild").toString() + "\", " +
-                                   QString::number(round(data.value("gear_score").toDouble(0))) + "}\n";
+                                if (name.compare(playerName, Qt::CaseInsensitive) == 0) {
+                                    double gearScore = data.value("gear_score").toDouble(0);
+                                    QString guild = data.value("guild").toString("");
+
+                                    (*ArmoryGS)[shardName][name.toLower()] = {
+                                        QString::number(round(gearScore)),
+                                        guild,
+                                        name
+                                    };
+
+                                    qDebug() << ((*ArmoryGS)[shardName][playerName].exactname + " | " +
+                                                 (*ArmoryGS)[shardName][playerName].guild + " | " +
+                                                 (*ArmoryGS)[shardName][playerName].gearscore + " | " +
+                                                 shardName);
+
+                                    out << "ArmoryGS[\"" + shardName +
+                                               "\"][\"" + name.toLower() + "\"] = {\"" +
+                                               name + "\", \"" +
+                                               guild + "\", " +
+                                               QString::number(round(gearScore)) + "}\n";
+                                    requestSuccess = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
         } else {
-            disconnect(reply, SIGNAL(finished()), &loop, SLOT(quit()));
             reply->abort();
         }
 
-        if (!(*ArmoryGS)[players->at(i + 1)].contains(players->at(i))) {
-            (*ArmoryGS)[players->at(i + 1)][players->at(i)] = {"0", "", ""};
-            out << "ArmoryGS[\"" + players->at(i + 1) + "\"][\"" + players->at(i) + "\"] = {\"" + players->at(i) + "\", \"\", -1}\n";
+        if (!requestSuccess && !(*ArmoryGS)[shardName].contains(playerName)) {
+            (*ArmoryGS)[shardName][playerName] = {"0", "", ""};
+            out << "ArmoryGS[\"" + shardName + "\"][\"" + playerName + "\"] = {\"" + playerName + "\", \"\", -1}\n";
         }
 
         reply->deleteLater();

@@ -28,18 +28,16 @@ public:
 
     void run();
 
-    void fetchData(QStringList *players);
-
 private:
     QString threadname;
-
     QString folder;
-
     bool *enabled;
-
     QMap<QString, QMap<QString, Player>> *ArmoryGS;
-
     QUrl url;
+
+    bool openFile(QFile& file, QIODevice::OpenMode mode);
+    QStringList parseBuffer(QTextStream& in);
+    void fetchData(QStringList *players);
 };
 
 #endif // WORKER_H

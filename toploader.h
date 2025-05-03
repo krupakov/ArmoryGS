@@ -27,18 +27,16 @@ public:
 
     void run();
 
-    void fetchData(int shard, QString *result);
-
 private:
     QString threadname;
-
     QString folder;
-
     bool *enabled;
-
     QMap<QString, QMap<QString, Player>> *GS100;
-
     QString apiLink;
+
+    bool saveResultToFile(const QString& result);
+    bool fetchData(int shard, QString *result);
+    void fetchDataWithRetry(int shard, QString *result);
 };
 
 #endif // TOPLOADER_H

@@ -24,28 +24,52 @@ void Toploader::run() {
     (*GS100).clear();
     for (auto it = ShardId.begin(); it != ShardId.end(); it++) {
         (*GS100)[it.value()] = {};
-        fetchData(it.key(), &result);
+        fetchDataWithRetry(it.key(), &result);
     }
 
+    if (!saveResultToFile(result)) {
+        qWarning() << "Failed to save data to file";
+    }
+}
+
+bool Toploader::saveResultToFile(const QString& result) {
     QFile GS100File(folder + "\\GS100.txt");
 
-    while(!GS100File.open(QIODevice::ExistingOnly | QIODevice::WriteOnly | QIODevice::Text)) {
+    while (true) {
+        if (!(*enabled)) {
+            return false;
+        }
+
+        if (GS100File.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream writeStream(&GS100File);
+            writeStream.setCodec("Windows-1251");
+            writeStream << result;
+            writeStream.flush();
+            GS100File.close();
+            return true;
+        }
+
+        this->thread()->sleep(1);
+    }
+}
+
+void Toploader::fetchDataWithRetry(int shard, QString *result) {
+    while (true) {
         if (!(*enabled)) {
             return;
         }
+
+        if (fetchData(shard, result)) {
+            return;
+        }
+
         this->thread()->sleep(1);
     }
-
-    QTextStream writeStream(&GS100File);
-    writeStream.setCodec("Windows-1251");
-    writeStream << result;
-    writeStream.flush();
-
-    GS100File.close();
 }
 
-void Toploader::fetchData(int shard, QString *result) {
+bool Toploader::fetchData(int shard, QString *result) {
     QList<QUrl> urls;
+    bool success = true;
 
     for (Class classId : ClassId) {
         urls.append(apiLink + QString::number(shard) + "/" + QString::number(classId));
@@ -54,11 +78,22 @@ void Toploader::fetchData(int shard, QString *result) {
     QNetworkAccessManager manager;
     QList<QNetworkReply*> replies;
     QEventLoop loop;
+    QTimer timeoutTimer;
+
+    timeoutTimer.setSingleShot(true);
+    QObject::connect(&timeoutTimer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeoutTimer.start(30000);
 
     int total = urls.length();
     foreach (const QUrl &url, urls) {
-        QNetworkReply *reply = manager.get(QNetworkRequest(url));
-        QObject::connect(reply, &QNetworkReply::finished, this, [&total, &loop]() {
+        QNetworkRequest request(url);
+        request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
+        QNetworkReply *reply = manager.get(request);
+
+        QObject::connect(reply, &QNetworkReply::finished, this, [&total, &loop, &success, reply]() {
+            if (reply->error() != QNetworkReply::NoError) {
+                success = false;
+            }
             total--;
             if (total < 1) {
                 loop.quit();
@@ -66,28 +101,74 @@ void Toploader::fetchData(int shard, QString *result) {
         });
         replies << reply;
     }
+
     loop.exec();
 
-    *result += "GS100[\"" + ShardId.value(static_cast<Shard>(shard)) + "\"] = {}\n";
+    if (!timeoutTimer.isActive()) {
+        qDeleteAll(replies.begin(), replies.end());
+        replies.clear();
+        return false;
+    }
+    timeoutTimer.stop();
+
+    if (!success) {
+        qDeleteAll(replies.begin(), replies.end());
+        replies.clear();
+        return false;
+    }
+
+    QString shardName = ShardId.value(static_cast<Shard>(shard));
+    *result += "GS100[\"" + shardName + "\"] = {}\n";
 
     foreach (QNetworkReply *reply, replies) {
-        QByteArray r(reply->readAll());
-        QJsonDocument jsonDocument = QJsonDocument::fromJson(r);
+        if (reply->error() != QNetworkReply::NoError) {
+            continue;
+        }
+
+        QByteArray r = reply->readAll();
+        QJsonParseError parseError;
+        QJsonDocument jsonDocument = QJsonDocument::fromJson(r, &parseError);
+
+        if (parseError.error != QJsonParseError::NoError) {
+            success = false;
+            continue;
+        }
+
+        if (!jsonDocument.isArray()) {
+            success = false;
+            continue;
+        }
+
         QJsonArray dataArray = jsonDocument.array();
 
         foreach (QJsonValue val, dataArray) {
+            if (!val.isObject()) {
+                continue;
+            }
+
             QJsonObject data = val.toObject();
+            QString name = data.value("name").toString();
+            QString gearscore = data.value("gearscore").toString();
+            QString guild = data.value("guild").toString();
 
-            (*GS100)[ShardId.value(static_cast<Shard>(shard))][data.value("name").toString().toLower()] = {data.value("gearscore").toString().mid(0, data.value("gearscore").toString().indexOf('.')), data.value("guild").toString(), data.value("name").toString()};
+            if (name.isEmpty() || gearscore.isEmpty()) {
+                continue;
+            }
 
-            *result += "GS100[\"" + ShardId.value(static_cast<Shard>(shard)) +
-                       "\"][\"" + data.value("name").toString().toLower() + "\"] = {\"" +
-                       data.value("name").toString() + "\", \"" +
-                       data.value("guild").toString() + "\", " +
-                       data.value("gearscore").toString().mid(0, data.value("gearscore").toString().indexOf('.')) + "}\n";
+            QString cleanGearscore = gearscore.mid(0, gearscore.indexOf('.'));
+
+            (*GS100)[shardName][name.toLower()] = {cleanGearscore, guild, name};
+
+            *result += "GS100[\"" + shardName +
+                       "\"][\"" + name.toLower() + "\"] = {\"" +
+                       name + "\", \"" +
+                       guild + "\", " +
+                       cleanGearscore + "}\n";
         }
     }
 
     qDeleteAll(replies.begin(), replies.end());
     replies.clear();
+
+    return success;
 }
